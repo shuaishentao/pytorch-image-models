@@ -11,7 +11,12 @@
 - [Citing](#citing)
 
 ## What's New
+## Oct 19, 2024
+* Cleanup torch amp usage to avoid cuda specific calls, merge support for Ascend (NPU) devices from [MengqingCao](https://github.com/MengqingCao) that should work now in PyTorch 2.5 w/ new device extension autoloading feature. Tested Intel Arc (XPU) in Pytorch 2.5 too and it (mostly) worked.
 
+## Oct 16, 2024
+* Fix error on importing from deprecated path `timm.models.registry`, increased priority of existing deprecation warnings to be visible
+* Port weights of InternViT-300M (https://huggingface.co/OpenGVLab/InternViT-300M-448px) to `timm` as `vit_intern300m_patch14_448`
 
 ### Oct 14, 2024
 * Pre-activation (ResNetV2) version of 18/18d/34/34d ResNet model defs added by request (weights pending)
