@@ -34,7 +34,7 @@ from torch.nn.parallel import DistributedDataParallel as NativeDDP
 from timm import utils
 from timm.data import create_dataset, create_loader, resolve_data_config, Mixup, FastCollateMixup, AugMixDataset
 from timm.layers import convert_splitbn_model, convert_sync_batchnorm, set_fast_norm
-from timm.loss import JsdCrossEntropy, SoftTargetCrossEntropy, BinaryCrossEntropy, LabelSmoothingCrossEntropy
+from timm.loss import JsdCrossEntropy, SoftTargetCrossEntropy, BinaryCrossEntropy, LabelSmoothingCrossEntropy, knowledge_distillation_kl_div_loss
 from timm.models import create_model, safe_model_name, resume_checkpoint, load_checkpoint, model_parameters
 from timm.optim import create_optimizer_v2, optimizer_kwargs
 from timm.scheduler import create_scheduler_v2, scheduler_kwargs
@@ -107,6 +107,14 @@ group.add_argument('--target-key', default=None, type=str,
 group = parser.add_argument_group('Model parameters')
 group.add_argument('--model', default='resnet50', type=str, metavar='MODEL',
                    help='Name of model to train (default: "resnet50")')
+group.add_argument('--teachermodel', default='resnet50', type=str, metavar='TEACHERMODEL',
+                   help='Name of model to train (default: "resnet50")')
+group.add_argument('--teacher-initial-checkpoint', default='', type=str, metavar='PATH',
+                   help='Load this checkpoint into model after initialization (default: none)')
+group.add_argument('--teacher-num-classes', type=int, default=None, metavar='N',
+                   help='number of label classes (Model default if None)')
+group.add_argument('--teacher-loss-weight', type=float, default=0.7, metavar='TEACHERWEIGHT',
+                   help='weight of kd loss')
 group.add_argument('--pretrained', action='store_true', default=False,
                    help='Start with pretrained version of specified network (if avail)')
 group.add_argument('--pretrained-path', default=None, type=str,
@@ -480,6 +488,17 @@ def main():
         **factory_kwargs,
         **args.model_kwargs,
     )
+
+    teacher_model = create_model(
+        args.teachermodel,
+        pretrained=False,
+        num_classes=args.teacher_num_classes,
+        in_chans=in_chans,
+        global_pool=args.gp,
+        scriptable=args.torchscript,
+        **args.model_kwargs,
+    )
+
     if args.head_init_scale is not None:
         with torch.no_grad():
             model.get_classifier().weight.mul_(args.head_init_scale)
@@ -490,6 +509,9 @@ def main():
     if args.num_classes is None:
         assert hasattr(model, 'num_classes'), 'Model must have `num_classes` attr if not set on cmd line/config.'
         args.num_classes = model.num_classes  # FIXME handle model default vs config num_classes more elegantly
+    if args.teacher_num_classes is None:
+        assert hasattr(teacher_model, 'teacher_num_classes'), 'TeacherModel must have `teacher_num_classes` attr if not set on cmd line/config.'
+
 
     if args.grad_checkpointing:
         model.set_grad_checkpointing(enable=True)
@@ -513,8 +535,10 @@ def main():
 
     # move model to GPU, enable channels last layout if set
     model.to(device=device)
+    teacher_model.to(device=device)
     if args.channels_last:
         model.to(memory_format=torch.channels_last)
+        teacher_model.to(memory_format=torch.channels_last)
 
     # setup synchronized BatchNorm for distributed training
     if args.distributed and args.sync_bn:
@@ -536,6 +560,7 @@ def main():
         assert not use_amp == 'apex', 'Cannot use APEX AMP with torchscripted model'
         assert not args.sync_bn, 'Cannot use SyncBatchNorm with torchscripted model'
         model = torch.jit.script(model)
+        teacher_model = torch.jit.script(teacher_model)
 
     if not args.lr:
         global_batch_size = args.batch_size * args.world_size * args.grad_accum_steps
@@ -848,6 +873,7 @@ def main():
             train_metrics = train_one_epoch(
                 epoch,
                 model,
+                teacher_model,
                 loader_train,
                 optimizer,
                 train_loss_fn,
@@ -938,6 +964,7 @@ def main():
 def train_one_epoch(
         epoch,
         model,
+        teacher_model,
         loader,
         optimizer,
         loss_fn,
@@ -965,6 +992,7 @@ def train_one_epoch(
     losses_m = utils.AverageMeter()
 
     model.train()
+    teacher_model.eval()
 
     accum_steps = args.grad_accum_steps
     last_accum_steps = len(loader) % accum_steps
@@ -996,7 +1024,10 @@ def train_one_epoch(
         def _forward():
             with amp_autocast():
                 output = model(input)
+                teacher_output = teacher_model(input)
                 loss = loss_fn(output, target)
+                kd_loss = knowledge_distillation_kl_div_loss(output, teacher_output)
+                loss = args.teacher_loss_weight * loss + (1 - args.teacher_loss_weight) * kd_loss
             if accum_steps > 1:
                 loss /= accum_steps
             return loss
