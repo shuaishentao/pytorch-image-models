@@ -80,15 +80,15 @@ parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 # Dataset parameters
 group = parser.add_argument_group('Dataset parameters')
 # Keep this argument outside the dataset group because it is positional.
-parser.add_argument('data', nargs='?', metavar='DIR', const=None,
+parser.add_argument('--data', nargs='?', default='/home/tao/dataset/cifar10/',metavar='DIR', const=None,
                     help='path to dataset (positional is *deprecated*, use --data-dir)')
 parser.add_argument('--data-dir', metavar='DIR',
                     help='path to dataset (root dir)')
 parser.add_argument('--dataset', metavar='NAME', default='',
                     help='dataset type + name ("<type>/<name>") (default: ImageFolder or ImageTar if empty)')
-group.add_argument('--train-split', metavar='NAME', default='train',
+group.add_argument('--train-split', metavar='NAME', default='train/',
                    help='dataset train split (default: train)')
-group.add_argument('--val-split', metavar='NAME', default='validation',
+group.add_argument('--val-split', metavar='NAME', default='test',
                    help='dataset validation split (default: validation)')
 parser.add_argument('--train-num-samples', default=None, type=int,
                     metavar='N', help='Manually specify num samples in train split, for IterableDatasets.')
@@ -107,17 +107,17 @@ group.add_argument('--target-key', default=None, type=str,
 
 # Model parameters
 group = parser.add_argument_group('Model parameters')
-group.add_argument('--model', default='resnet50', type=str, metavar='MODEL',
+group.add_argument('--model', default='resnet18', type=str, metavar='MODEL',
                    help='Name of model to train (default: "resnet50")')
-group.add_argument('--teachermodel', default='resnet50', type=str, metavar='TEACHERMODEL',
+group.add_argument('--teachermodel', default='resnet101', type=str, metavar='TEACHERMODEL',
                    help='Name of model to train (default: "resnet50")')
-group.add_argument('--teacher-initial-checkpoint', default='', type=str, metavar='PATH',
+group.add_argument('--teacher-initial-checkpoint', default='results/resnet101/20241103-160549-resnet101-224/model_best.pth.tar', type=str, metavar='PATH',
                    help='Load this checkpoint into model after initialization (default: none)')
-group.add_argument('--teacher-num-classes', type=int, default=None, metavar='N',
+group.add_argument('--teacher-num-classes', type=int, default=10, metavar='N',
                    help='number of label classes (Model default if None)')
 group.add_argument('--teacher-loss-weight', type=float, default=0.7, metavar='TEACHERWEIGHT',
                    help='weight of kd loss')
-group.add_argument('--pretrained', action='store_true', default=False,
+group.add_argument('--pretrained', action='store_true', default=True,
                    help='Start with pretrained version of specified network (if avail)')
 group.add_argument('--pretrained-path', default=None, type=str,
                    help='Load this checkpoint as if they were the pretrained weights (with adaptation).')
@@ -127,7 +127,7 @@ group.add_argument('--resume', default='', type=str, metavar='PATH',
                    help='Resume full model and optimizer state from checkpoint (default: none)')
 group.add_argument('--no-resume-opt', action='store_true', default=False,
                    help='prevent resume of optimizer state when resuming model')
-group.add_argument('--num-classes', type=int, default=None, metavar='N',
+group.add_argument('--num-classes', type=int, default=10, metavar='N',
                    help='number of label classes (Model default if None)')
 group.add_argument('--gp', default=None, type=str, metavar='POOL',
                    help='Global pool type, one of (fast, avg, max, avgmax, avgmaxc). Model default if None.')
@@ -146,7 +146,7 @@ group.add_argument('--std', type=float, nargs='+', default=None, metavar='STD',
                    help='Override std deviation of dataset')
 group.add_argument('--interpolation', default='', type=str, metavar='NAME',
                    help='Image resize interpolation type (overrides model)')
-group.add_argument('-b', '--batch-size', type=int, default=128, metavar='N',
+group.add_argument('-b', '--batch-size', type=int, default=64, metavar='N',
                    help='Input batch size for training (default: 128)')
 group.add_argument('-vb', '--validation-batch-size', type=int, default=None, metavar='N',
                    help='Validation batch size override (default: None)')
@@ -179,7 +179,7 @@ scripting_group.add_argument('--torchcompile', nargs='?', type=str, default=None
 group = parser.add_argument_group('Device parameters')
 group.add_argument('--device', default='cuda', type=str,
                     help="Device (accelerator) to use.")
-group.add_argument('--amp', action='store_true', default=False,
+group.add_argument('--amp', action='store_true', default=True,
                    help='use NVIDIA Apex AMP or Native AMP for mixed precision training')
 group.add_argument('--amp-dtype', default='float16', type=str,
                    help='lower precision AMP dtype (default: float16)')
@@ -514,6 +514,8 @@ def main():
     if args.teacher_num_classes is None:
         assert hasattr(teacher_model, 'teacher_num_classes'), 'TeacherModel must have `teacher_num_classes` attr if not set on cmd line/config.'
 
+    if args.teacher_initial_checkpoint:
+        load_checkpoint(teacher_model, args.teacher_initial_checkpoint)
 
     if args.grad_checkpointing:
         model.set_grad_checkpointing(enable=True)
@@ -998,7 +1000,8 @@ def train_one_epoch(
     losses_m = utils.AverageMeter()
 
     model.train()
-    teacher_model.eval()
+    with torch.no_grad():
+        teacher_model.eval()
 
     accum_steps = args.grad_accum_steps
     last_accum_steps = len(loader) % accum_steps
