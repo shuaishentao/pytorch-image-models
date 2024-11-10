@@ -64,3 +64,31 @@ class CRDLoss(nn.Module):
         # labels 的每个值作为每行的目标类（正样本对的标签）。
         loss = F.cross_entropy(logits, labels)
         return loss
+
+
+class DirectNormLoss(nn.Module):
+    '''
+    它可以帮助学生模型(student)学习教师模型(teacher)的类间和类内特征分布结构。
+    这种应用的主要目的是增强学生模型的表达能力，使其更接近教师模型在特征空间的分布。
+    '''
+    def __init__(self, num_class=100, nd_loss_factor=1.0):
+        super(DirectNormLoss, self).__init__()
+        self.num_class = num_class
+        self.nd_loss_factor = nd_loss_factor
+    
+    def project_center(self, s_emb, t_emb, T_EMB, labels):
+        assert s_emb.size() == t_emb.size()
+        assert s_emb.shape[0] == len(labels)
+        loss = 0.0
+        for s, t, i in zip(s_emb, t_emb, labels):
+            i = i.item()
+            center = torch.tensor(T_EMB[str(i)]).cuda()
+            e_c = center / center.norm(p=2)
+            max_norm = max(s.norm(p=2), t.norm(p=2))
+            loss += 1 - torch.dot(s, e_c) / max_norm
+        return loss
+     
+    def forward(self, s_emb, t_emb, T_EMB, labels):
+        nd_loss = self.project_center(s_emb=s_emb, t_emb=t_emb, T_EMB=T_EMB, labels=labels) * self.nd_loss_factor
+        
+        return nd_loss / len(labels)
