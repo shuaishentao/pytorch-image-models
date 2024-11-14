@@ -34,7 +34,7 @@ from torch.nn.parallel import DistributedDataParallel as NativeDDP
 from timm import utils
 from timm.data import create_dataset, create_loader, resolve_data_config, Mixup, FastCollateMixup, AugMixDataset
 from timm.layers import convert_splitbn_model, convert_sync_batchnorm, set_fast_norm
-from timm.loss import JsdCrossEntropy, SoftTargetCrossEntropy, BinaryCrossEntropy, LabelSmoothingCrossEntropy, knowledge_distillation_kl_div_loss
+from timm.loss import JsdCrossEntropy, SoftTargetCrossEntropy, BinaryCrossEntropy, LabelSmoothingCrossEntropy, knowledge_distillation_kl_div_loss, DirectNormLoss
 from timm.models import create_model, safe_model_name, resume_checkpoint, load_checkpoint, model_parameters
 from timm.optim import create_optimizer_v2, optimizer_kwargs
 from timm.scheduler import create_scheduler_v2, scheduler_kwargs
@@ -113,9 +113,11 @@ group.add_argument('--teacher-initial-checkpoint', default='results/resnet101/20
                    help='Load this checkpoint into model after initialization (default: none)')
 group.add_argument('--teacher-num-classes', type=int, default=10, metavar='N',
                    help='number of label classes (Model default if None)')
-group.add_argument('--teacher-loss-weight', type=float, default=1, metavar='TEACHERWEIGHT',
+group.add_argument('--teacher-loss-weight', type=float, default=0.7, metavar='TEACHERWEIGHT',
                    help='weight of kd loss')
-group.add_argument('--ori-loss-weight', type=float, default=1, metavar='TEACHERWEIGHT',
+group.add_argument('--ori-loss-weight', type=float, default=0.3, metavar='ORILOSSWEIGHT',
+                   help='weight of roi loss')
+group.add_argument('--directnorm-loss-weight', type=float, default=1, metavar='DIRECTNORMLOSSWEIGHT',
                    help='weight of roi loss')
 group.add_argument('--pretrained', action='store_true', default=True,
                    help='Start with pretrained version of specified network (if avail)')
@@ -195,7 +197,7 @@ parser.add_argument('--device-modules', default=None, type=str, nargs='+',
 
 # Optimizer parameters
 group = parser.add_argument_group('Optimizer parameters')
-group.add_argument('--opt', default='sgd', type=str, metavar='OPTIMIZER',
+group.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
                    help='Optimizer (default: "sgd")')
 group.add_argument('--opt-eps', default=None, type=float, metavar='EPSILON',
                    help='Optimizer Epsilon (default: None, use opt default)')
@@ -221,7 +223,7 @@ group.add_argument('--sched-on-updates', action='store_true', default=False,
                    help='Apply LR scheduler step on update instead of epoch end.')
 group.add_argument('--lr', type=float, default=None, metavar='LR',
                    help='learning rate, overrides lr-base if set (default: None)')
-group.add_argument('--lr-base', type=float, default=0.1, metavar='LR',
+group.add_argument('--lr-base', type=float, default=0.001, metavar='LR',
                    help='base learning rate: lr = lr_base * global_batch_size / base_size')
 group.add_argument('--lr-base-size', type=int, default=256, metavar='DIV',
                    help='base learning rate batch size (divisor, default: 256).')
@@ -383,7 +385,7 @@ group.add_argument('--pin-mem', action='store_true', default=False,
                    help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
 group.add_argument('--no-prefetcher', action='store_true', default=False,
                    help='disable fast prefetcher')
-group.add_argument('--output', default='results/resnet50kd18', type=str, metavar='PATH',
+group.add_argument('--output', default='results/resnet101kd18/W07dn1T10adamw', type=str, metavar='PATH',
                    help='path to output folder (default: none, current dir)')
 group.add_argument('--experiment', default='', type=str, metavar='NAME',
                    help='name of train experiment, name of sub-folder for output')
@@ -803,6 +805,7 @@ def main():
         train_loss_fn = nn.CrossEntropyLoss()
     train_loss_fn = train_loss_fn.to(device=device)
     validate_loss_fn = nn.CrossEntropyLoss().to(device=device)
+    nd_loss_fn = DirectNormLoss(num_class=10).to(device=device)
 
     # setup checkpoint saver and eval metric tracking
     eval_metric = args.eval_metric if loader_eval is not None else 'loss'
@@ -866,6 +869,10 @@ def main():
         _logger.info(
             f'Scheduled epochs: {num_epochs}. LR stepped per {"epoch" if lr_scheduler.t_in_epochs else "update"}.')
 
+    with open("tools/run/cifar10_embedding_fea_resnet101.json", 'r') as f:
+        t_EMB = json.load(f)
+    f.close()
+
     results = []
     try:
         for epoch in range(start_epoch, num_epochs):
@@ -881,6 +888,8 @@ def main():
                 loader_train,
                 optimizer,
                 train_loss_fn,
+                nd_loss_fn,
+                t_EMB,
                 args,
                 lr_scheduler=lr_scheduler,
                 saver=saver,
@@ -964,6 +973,12 @@ def main():
         _logger.info('*** Best metric: {0} (epoch {1})'.format(best_metric, best_epoch))
     print(f'--result\n{json.dumps(results, indent=4)}')
 
+def get_layer_output(layer):
+    outputs = []  # 局部变量，用于存储输出
+    def hook_fn(module, input, output):
+        outputs.append(output)
+    handle = layer.register_forward_hook(hook_fn)
+    return outputs, handle
 
 def train_one_epoch(
         epoch,
@@ -972,6 +987,8 @@ def train_one_epoch(
         loader,
         optimizer,
         loss_fn,
+        nd_loss,
+        t_EMB,
         args,
         device=torch.device('cuda'),
         lr_scheduler=None,
@@ -995,6 +1012,9 @@ def train_one_epoch(
     data_time_m = utils.AverageMeter()
     losses_m = utils.AverageMeter()
 
+    # 获取global_pool层的输出
+    gp_outputs_model, handle_model = get_layer_output(model.global_pool)
+    gp_outputs_teacher_model, handle_teacher_model = get_layer_output(teacher_model.global_pool)
     model.train()
     teacher_model.eval()
 
@@ -1031,8 +1051,11 @@ def train_one_epoch(
                 with torch.no_grad():
                     teacher_output = teacher_model(input)
                 loss = loss_fn(output, target)
-                kd_loss = knowledge_distillation_kl_div_loss(output, teacher_output,T=20).mean()
-                loss = args.ori_loss_weight * loss + args.teacher_loss_weight * kd_loss
+                kd_loss = knowledge_distillation_kl_div_loss(output, teacher_output,T=10).mean()
+                # ND loss
+                norm_dir_loss = nd_loss(s_emb=gp_outputs_model[0], t_emb=gp_outputs_teacher_model[0], T_EMB=t_EMB, labels=target)
+                loss = args.ori_loss_weight * loss + args.teacher_loss_weight * kd_loss + args.directnorm_loss_weight * norm_dir_loss
+
             if accum_steps > 1:
                 loss /= accum_steps
             return loss

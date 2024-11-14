@@ -71,10 +71,10 @@ class DirectNormLoss(nn.Module):
     它可以帮助学生模型(student)学习教师模型(teacher)的类间和类内特征分布结构。
     这种应用的主要目的是增强学生模型的表达能力，使其更接近教师模型在特征空间的分布。
     '''
-    def __init__(self, num_class=100, nd_loss_factor=1.0):
+    def __init__(self, num_class=100):
         super(DirectNormLoss, self).__init__()
         self.num_class = num_class
-        self.nd_loss_factor = nd_loss_factor
+        # self.nd_loss_factor = nd_loss_factor
     
     def project_center(self, s_emb, t_emb, T_EMB, labels):
         assert s_emb.size() == t_emb.size()
@@ -89,6 +89,6 @@ class DirectNormLoss(nn.Module):
         return loss
      
     def forward(self, s_emb, t_emb, T_EMB, labels):
-        nd_loss = self.project_center(s_emb=s_emb, t_emb=t_emb, T_EMB=T_EMB, labels=labels) * self.nd_loss_factor
+        nd_loss = self.project_center(s_emb=s_emb, t_emb=t_emb, T_EMB=T_EMB, labels=labels)
         
         return nd_loss / len(labels)

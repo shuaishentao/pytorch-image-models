@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from collections import OrderedDict
 
 import sys
-sys.path.append('')
+sys.path.append('/home/tao/code/cls/pytorch-image-models')
 from timm.data import create_dataset, create_loader
 from timm.models import create_model, load_checkpoint
 
@@ -14,8 +14,16 @@ import numpy as np
 import argparse
 import json
 
+
+# 使用钩子函数来获取指定层的输出
+outputs = {}
+
+def hook_fn(module, input, output):
+    outputs["global_pool"] = output
+
 def emb_fea(model, dataloader, args):
     # model to evaluate mode
+    model.global_pool.register_forward_hook(hook_fn)
     model.eval()
     EMB = {}
 
@@ -24,7 +32,9 @@ def emb_fea(model, dataloader, args):
             images, labels = images.cuda(), labels.cuda()
 
             # compute output
-            emb_fea, logits = model(images, embed=True)
+            # emb_fea, logits = model(images, embed=True)
+            logits = model(images)
+            emb_fea = outputs["global_pool"]
 
             for emb, i in zip(emb_fea, labels):
                 i = i.item()
@@ -47,9 +57,7 @@ def emb_fea(model, dataloader, args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Visualized the embedding feature of the model on the train set.')
-    parser.add_argument("--model_name", type=str, default="resnet56_cifar", choices=model_names, help="model architecture")
-    parser.add_argument("--model_weights", type=str, default="", help="model weights path")
-    parser.add_argument("--emb_size", type=int, default=64, help="emb fea size")
+    parser.add_argument("--emb_size", type=int, default=2048, help="emb fea size")
     parser.add_argument("--dataset", type=str, default='cifar10')
     parser.add_argument("--batch_size", type=int, default=64, help="total batch size")
     parser.add_argument('--workers', default=4, type=int, help='number of data loading workers')
@@ -61,8 +69,6 @@ if __name__ == "__main__":
                    help='Load this checkpoint into model after initialization (default: none)')
     parser.add_argument('--data-dir', default='/home/tao/dataset/cifar10/',metavar='DIR',
                     help='path to dataset (root dir)')
-    parser.add_argument('--dataset', metavar='NAME', default='',
-                    help='dataset type + name ("<type>/<name>") (default: ImageFolder or ImageTar if empty)')
     parser.add_argument('--train-split', metavar='NAME', default='train/',
                    help='dataset train split (default: train)')
 
@@ -89,7 +95,6 @@ if __name__ == "__main__":
         hflip=0.5,
         vflip=0.,
         color_jitter=0.4,
-        interpolation='random',
         mean=(0.485, 0.456, 0.406),
         std=(0.229, 0.224, 0.225),
         num_workers=4,
@@ -110,6 +115,6 @@ if __name__ == "__main__":
 
     emb = emb_fea(model=teacher_model, dataloader=loader_train, args=args)
     emb_json = json.dumps(emb, indent=4)
-    with open("./run/{}_embedding_fea/{}.json".format(args.dataset, args.model_name), 'w', encoding='utf-8') as f:
+    with open("./tools/run/{}_embedding_fea_{}.json".format(args.dataset, args.teachermodel), 'w', encoding='utf-8') as f:
         f.write(emb_json)
     f.close()

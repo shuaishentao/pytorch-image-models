@@ -115,7 +115,11 @@ group.add_argument('--teacher-initial-checkpoint', default='results/resnet101/20
                    help='Load this checkpoint into model after initialization (default: none)')
 group.add_argument('--teacher-num-classes', type=int, default=10, metavar='N',
                    help='number of label classes (Model default if None)')
-group.add_argument('--teacher-loss-weight', type=float, default=0.7, metavar='TEACHERWEIGHT',
+group.add_argument('--teacher-loss-weight', type=float, default=1.0, metavar='TEACHERWEIGHT',
+                   help='weight of kd loss')
+group.add_argument('--student-loss-weight', type=float, default=0.3, metavar='STUDENTWEIGHT',
+                   help='weight of kd loss')
+group.add_argument('--crd-temperature', type=float, default=0.3, metavar='STUDENTWEIGHT',
                    help='weight of kd loss')
 group.add_argument('--pretrained', action='store_true', default=True,
                    help='Start with pretrained version of specified network (if avail)')
@@ -804,7 +808,7 @@ def main():
     train_loss_fn = train_loss_fn.to(device=device)
     validate_loss_fn = nn.CrossEntropyLoss().to(device=device)
     # kd loss
-    kd_crd_loss_fn = CRDLoss(temperature=0.5).to(device=device)
+    kd_crd_loss_fn = CRDLoss(temperature=args.crd_temperature).to(device=device)
 
     # setup checkpoint saver and eval metric tracking
     eval_metric = args.eval_metric if loader_eval is not None else 'loss'
@@ -1033,11 +1037,12 @@ def train_one_epoch(
         def _forward():
             with amp_autocast():
                 output = model(input)
-                teacher_output = teacher_model(input)
+                with torch.no_grad():
+                    teacher_output = teacher_model(input)
                 loss = loss_fn(output, target)
                 positive_indices = torch.arange(input.size(0)) 
                 kd_loss = kd_crd_loss_fn(output, teacher_output, positive_indices)
-                loss = args.teacher_loss_weight * kd_loss + (1 - args.teacher_loss_weight) * loss
+                loss = args.teacher_loss_weight * kd_loss + args.student_loss_weight * loss
             if accum_steps > 1:
                 loss /= accum_steps
             return loss
