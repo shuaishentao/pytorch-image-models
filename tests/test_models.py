@@ -53,13 +53,13 @@ FEAT_INTER_FILTERS = [
     'vision_transformer', 'vision_transformer_sam', 'vision_transformer_hybrid', 'vision_transformer_relpos',
     'beit', 'mvitv2', 'eva', 'cait', 'xcit', 'volo', 'twins', 'deit', 'swin_transformer', 'swin_transformer_v2',
     'swin_transformer_v2_cr', 'maxxvit', 'efficientnet', 'mobilenetv3', 'levit', 'efficientformer', 'resnet',
-    'regnet', 'byobnet', 'byoanet', 'mlp_mixer', 'hiera', 'fastvit', 'hieradet_sam2'
+    'regnet', 'byobnet', 'byoanet', 'mlp_mixer', 'hiera', 'fastvit', 'hieradet_sam2', 'aimv2*'
 ]
 
 # transformer / hybrid models don't support full set of spatial / feature APIs and/or have spatial output.
 NON_STD_FILTERS = [
     'vit_*', 'tnt_*', 'pit_*', 'coat_*', 'cait_*', '*mixer_*', 'gmlp_*', 'resmlp_*', 'twins_*',
-    'convit_*', 'levit*', 'visformer*', 'deit*', 'xcit_*', 'crossvit_*', 'beit*',
+    'convit_*', 'levit*', 'visformer*', 'deit*', 'xcit_*', 'crossvit_*', 'beit*', 'aimv2*',
     'poolformer_*', 'volo_*', 'sequencer2d_*', 'mvitv2*', 'gcvit*', 'efficientformer*', 'sam_hiera*',
     'eva_*', 'flexivit*', 'eva02*', 'samvit_*', 'efficientvit_m*', 'tiny_vit_*', 'hiera_*', 'vitamin*', 'test_vit*',
 ]
@@ -72,11 +72,11 @@ if 'GITHUB_ACTIONS' in os.environ:
         '*efficientnet_l2*', '*resnext101_32x48d', '*in21k', '*152x4_bitm', '*101x3_bitm', '*50x3_bitm',
         '*nfnet_f3*', '*nfnet_f4*', '*nfnet_f5*', '*nfnet_f6*', '*nfnet_f7*', '*efficientnetv2_xl*',
         '*resnetrs350*', '*resnetrs420*', 'xcit_large_24_p8*', '*huge*', '*giant*', '*gigantic*',
-        '*enormous*', 'maxvit_xlarge*', 'regnet*1280', 'regnet*2560']
-    NON_STD_EXCLUDE_FILTERS = ['*huge*', '*giant*',  '*gigantic*', '*enormous*']
+        '*enormous*', 'maxvit_xlarge*', 'regnet*1280', 'regnet*2560', '*_1b_*', '*_3b_*']
+    NON_STD_EXCLUDE_FILTERS = ['*huge*', '*giant*',  '*gigantic*', '*enormous*', '*_1b_*', '*_3b_*']
 else:
     EXCLUDE_FILTERS = ['*enormous*']
-    NON_STD_EXCLUDE_FILTERS = ['*gigantic*', '*enormous*']
+    NON_STD_EXCLUDE_FILTERS = ['*gigantic*', '*enormous*', '*_3b_*']
 
 EXCLUDE_JIT_FILTERS = ['hiera_*']
 
@@ -146,21 +146,21 @@ def test_model_inference(model_name, batch_size):
         rand_output = model(rand_tensors['input'])
         rand_features = model.forward_features(rand_tensors['input'])
         rand_pre_logits = model.forward_head(rand_features, pre_logits=True)
-        assert torch.allclose(rand_output, rand_tensors['output'], rtol=1e-3, atol=1e-4)
-        assert torch.allclose(rand_features, rand_tensors['features'], rtol=1e-3, atol=1e-4)
-        assert torch.allclose(rand_pre_logits, rand_tensors['pre_logits'], rtol=1e-3, atol=1e-4)
+        assert torch.allclose(rand_output, rand_tensors['output'], rtol=1e-3, atol=1e-4), 'rand output does not match'
+        assert torch.allclose(rand_features, rand_tensors['features'], rtol=1e-3, atol=1e-4), 'rand features do not match'
+        assert torch.allclose(rand_pre_logits, rand_tensors['pre_logits'], rtol=1e-3, atol=1e-4), 'rand pre_logits do not match'
 
-        def _test_owl(owl_input):
+        def _test_owl(owl_input, tol=(1e-3, 1e-4)):
             owl_output = model(owl_input)
             owl_features = model.forward_features(owl_input)
             owl_pre_logits = model.forward_head(owl_features.clone(), pre_logits=True)
             assert owl_output.softmax(1).argmax(1) == 24  # owl
-            assert torch.allclose(owl_output, owl_tensors['output'], rtol=1e-3, atol=1e-4)
-            assert torch.allclose(owl_features, owl_tensors['features'], rtol=1e-3, atol=1e-4)
-            assert torch.allclose(owl_pre_logits, owl_tensors['pre_logits'], rtol=1e-3, atol=1e-4)
+            assert torch.allclose(owl_output, owl_tensors['output'], rtol=tol[0], atol=tol[1]), 'owl output does not match'
+            assert torch.allclose(owl_features, owl_tensors['features'], rtol=tol[0], atol=tol[1]), 'owl output does not match'
+            assert torch.allclose(owl_pre_logits, owl_tensors['pre_logits'], rtol=tol[0], atol=tol[1]), 'owl output does not match'
 
         _test_owl(owl_tensors['input'])  # test with original pp owl tensor
-        _test_owl(pp(test_owl).unsqueeze(0))  # re-process from original jpg
+        _test_owl(pp(test_owl).unsqueeze(0), tol=(1e-1, 1e-1))  # re-process from original jpg, Pillow output can change a lot btw ver
 
 
 @pytest.mark.base
@@ -265,6 +265,7 @@ def test_model_default_cfgs(model_name, batch_size):
 
         # test forward after deleting the classifier, output should be poooled, size(-1) == model.num_features
         model.reset_classifier(0)
+        assert model.num_classes == 0, f'Expected num_classes to be 0 after reset_classifier(0), but got {model.num_classes}'
         model.to(torch_device)
         outputs = model.forward(input_tensor)
         assert len(outputs.shape) == 2
@@ -339,6 +340,7 @@ def test_model_default_cfgs_non_std(model_name, batch_size):
 
     # test forward after deleting the classifier, output should be poooled, size(-1) == model.num_features
     model.reset_classifier(0)
+    assert model.num_classes == 0, f'Expected num_classes to be 0 after reset_classifier(0), but got {model.num_classes}'
     model.to(torch_device)
     outputs = model.forward(input_tensor)
     if isinstance(outputs,  (tuple, list)):
